@@ -2,6 +2,7 @@
 
 use crate::vimba_sys::VmbErrorType;
 use crate::Result;
+use std::fmt;
 
 
 
@@ -75,5 +76,41 @@ impl TryFrom<i32> for Error {
             VmbErrorIO => Ok(IO),
             _ => Err(())
         }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Error::*;
+
+        let msg = match *self {
+            InternalFault => "internal fault",
+            ApiNotStarted => "API not started (open Vimba context needed)",
+            NotFound => "device or feature not found",
+            BadHandle => "invalid handle",
+            DeviceNotOpen => "device not open",
+            InvalidAccess => "invalid access (due to access mode or current API state)",
+            BadParameter => "invalid parameter value",
+            StructSize => "invalid struct size for this version of Vimba",
+            MoreData => "not all data was read",
+            WrongType => "incorrect feature type",
+            InvalidValue => "invalid feature value (out of range or bad increment)",
+            Timeout => "timed out",
+            Other => "other unknown error",
+            Resources => "resources (e.g. memory) not available",
+            InvalidCall => "call is invalid in the current context",
+            NoTL => "transport layer(s) not found",
+            NotImplemented => "not implemented",
+            NotSupported => "not supported",
+            Incomplete => "operation was not completed",
+            IO => "transport layer I/O error",
+
+            // My additional errors
+            DeviceBusy => "device busy"
+        };
+
+        write!(fmt, "Vimba error {:?}: {}", self, msg)
     }
 }
