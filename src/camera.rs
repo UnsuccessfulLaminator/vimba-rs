@@ -111,6 +111,20 @@ impl Frame<&[u8]> {
     }
 }
 
+impl<T> Default for Frame<T> where T: Default + AsRef<[u8]> {
+    fn default() -> Self {
+        Self {
+            data: T::default(),
+            width: 0,
+            height: 0,
+            offset_x: 0,
+            offset_y: 0,
+            id: 0,
+            timestamp: 0
+        }
+    }
+}
+
 
 
 pub trait CameraCallback: Send + FnMut(Frame<&[u8]>) -> Flow {}
