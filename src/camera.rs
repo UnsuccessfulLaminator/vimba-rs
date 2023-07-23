@@ -41,7 +41,7 @@ pub struct CameraInfo {
 }
 
 impl CameraInfo {
-    pub fn from_c_struct(info: VmbCameraInfo_t) -> Self {
+    pub(crate) fn from_c_struct(info: VmbCameraInfo_t) -> Self {
         Self {
             id: unsafe { pointer_to_str(info.cameraIdString).to_string() },
             name: unsafe { pointer_to_str(info.cameraName).to_string() },
@@ -55,10 +55,66 @@ impl CameraInfo {
 
 
 
+pub struct Frame<T: AsRef<[u8]>> {
+    pub data: T,
+    pub width: usize,
+    pub height: usize,
+    pub offset_x: usize,
+    pub offset_y: usize,
+    pub id: u64,
+    pub timestamp: u64
+}
 
-pub trait CameraCallback: Send + FnMut(&[u8]) -> Flow {}
+impl<T: AsRef<[u8]>> Frame<T> {
+    fn from_c_struct(frame: &VmbFrame_t, data: T) -> Self {
+        Self {
+            data,
+            width: frame.width as usize,
+            height: frame.height as usize,
+            offset_x: frame.offsetX as usize,
+            offset_y: frame.offsetY as usize,
+            id: frame.frameID,
+            timestamp: frame.timestamp
+        }
+    }
 
-impl<T> CameraCallback for T where T: Send + FnMut(&[u8]) -> Flow {}
+    pub fn map_data<'a, U, F>(&'a self, f: F) -> Frame<U>
+    where U: AsRef<[u8]>, F: FnOnce(&'a T) -> U {
+        Frame::<U> {
+            data: f(&self.data),
+            width: self.width,
+            height: self.height,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            id: self.id,
+            timestamp: self.timestamp
+        }
+    }
+
+    pub fn with_ref_data(&self) -> Frame<&[u8]> {
+        self.map_data(AsRef::as_ref)
+    }
+
+    pub fn with_vec_data(&self) -> Frame<Vec<u8>> {
+        self.map_data(|data| data.as_ref().to_vec())
+    }
+}
+
+impl Frame<&[u8]> {
+    unsafe fn from_c_struct_ref_data(frame: &VmbFrame_t) -> Self {
+        let buffer_ptr = frame.buffer as *const u8;
+        let buffer_size = frame.bufferSize as usize;
+        let data = std::slice::from_raw_parts(buffer_ptr, buffer_size);
+
+        Self::from_c_struct(frame, data)
+    }
+}
+
+
+
+pub trait CameraCallback: Send + FnMut(Frame<&[u8]>) -> Flow {}
+
+impl<T> CameraCallback for T where T: Send + FnMut(Frame<&[u8]>) -> Flow {}
 
 struct CameraCallbackContext {
     handler: Box<dyn CameraCallback>,
@@ -97,11 +153,12 @@ impl<'a> Camera<'a> {
         else { Ok(()) }
     }
 
-    pub fn get_frame(&mut self) -> Result<Vec<u8>> {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    pub fn get_frame(&mut self) -> Result<Frame<Vec<u8>>> {
+        let (tx, rx) = mpsc::channel::<Frame<_>>();
 
-        self.stream(move |frame| {
-            tx.send(frame.to_vec()).unwrap();
+        self.stream(move |frame: Frame<&[u8]>| {
+            tx.send(frame.with_vec_data()).unwrap();
+
             Flow::Break
         })?;
 
@@ -149,11 +206,9 @@ impl<'a> Camera<'a> {
             if *stopped { return; }
 
             let handler = &mut *((*frame).context[0] as *mut F);
-            let buffer_size = (*frame).bufferSize as usize;
-            let buffer_ptr = (*frame).buffer as *const u8;
-            let buffer = std::slice::from_raw_parts(buffer_ptr, buffer_size);
+            let frame_rs = Frame::from_c_struct_ref_data(&*frame);
             
-            if handler(buffer) == Flow::Break {
+            if handler(frame_rs) == Flow::Break {
                 *stopped = true;
             }
             else {
@@ -213,7 +268,7 @@ impl<'a> Camera<'a> {
 
     pub fn stream<F: CameraCallback + 'static>(&mut self, mut handler: F) -> Result<()> {
         let (tx, rx) = mpsc::channel::<()>();
-        let wrapper = move |frame: &[u8]| {
+        let wrapper = move |frame: Frame<&[u8]>| {
             let action = handler(frame);
 
             if action == Flow::Break { tx.send(()).unwrap(); }

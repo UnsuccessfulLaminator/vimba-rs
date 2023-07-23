@@ -33,6 +33,6 @@ macro_rules! vmbcall {
 pub mod prelude {
     pub use crate::feature::HasFeatures;
     pub use crate::vimba::Vimba;
-    pub use crate::camera::{Camera, AccessMode};
+    pub use crate::camera::{Camera, AccessMode, Frame};
     pub use crate::Flow;
 }
