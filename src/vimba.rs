@@ -3,8 +3,9 @@ use crate::feature::*;
 use crate::camera::*;
 use crate::{vmbcall, Result};
 use std::ffi::CString;
-use std::sync::atomic;
 use std::{mem, ptr};
+use std::sync::{Arc, Mutex, Weak};
+use lazy_static::lazy_static;
 
 
 
@@ -14,19 +15,45 @@ const GLOBAL_HANDLE: VmbHandle_t = 1 as VmbHandle_t;
 
 
 
+pub(crate) struct VimbaContext;
+
+impl VimbaContext {
+    fn new() -> Result<Self> {
+        vmbcall!(VmbStartup)?;
+        
+        Ok(Self {})
+    }
+}
+
+impl Drop for VimbaContext {
+    fn drop(&mut self) {
+        unsafe { VmbShutdown(); }
+    }
+}
+
+lazy_static! {
+    static ref CONTEXT: Mutex<Weak<VimbaContext>> = Mutex::new(Weak::new());
+}
 
 
 
-static VIMBA_CONTEXTS: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
-
-pub struct Vimba;
+pub struct Vimba {
+    ctx: Arc<VimbaContext>
+}
 
 impl Vimba {
     pub fn new() -> Result<Self> {
-        vmbcall!(VmbStartup)?;
-        VIMBA_CONTEXTS.fetch_add(1, atomic::Ordering::SeqCst);
+        let mut ctx_weak = CONTEXT.lock().unwrap();
+        
+        match ctx_weak.upgrade() {
+            Some(ctx) => Ok(Self { ctx }),
+            None => {
+                let ctx = Arc::new(VimbaContext::new()?);
+                *ctx_weak = Arc::downgrade(&ctx);
 
-        Ok(Self {})
+                Ok(Self { ctx })
+            }
+        }
     }
 
     pub fn get_version(&self) -> Result<String> {
@@ -60,7 +87,7 @@ impl Vimba {
 
         vmbcall!(VmbCameraOpen, id.as_ptr(), access_mode.bits(), &mut handle)?;
 
-        Ok(Camera::from_handle(handle, self))
+        Ok(Camera::from_handle(handle, self.ctx.clone()))
     }
 }
 
@@ -83,13 +110,5 @@ impl HasFeatures for Vimba {
 
     fn is_command_done(&self, name: &str) -> Result<bool> {
         GLOBAL_HANDLE.is_command_done(name)
-    }
-}
-
-impl Drop for Vimba {
-    fn drop(&mut self) {
-        let prev_count = VIMBA_CONTEXTS.fetch_sub(1, atomic::Ordering::SeqCst);
-
-        if prev_count == 1 { unsafe { VmbShutdown(); } }
     }
 }

@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 bitflags = "2.3.3"
 enum-as-inner = "0.6.0"
+lazy_static = "1.4.0"

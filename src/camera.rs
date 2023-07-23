@@ -3,12 +3,13 @@
 use crate::vimba_sys::*;
 use crate::feature::*;
 use crate::error::Error;
-use crate::vimba::Vimba;
+use crate::vimba::VimbaContext;
 use crate::util::pointer_to_str;
 use crate::{Result, vmbcall, Flow};
 use std::mem;
 use std::sync::mpsc;
 use std::pin::Pin;
+use std::sync::Arc;
 use bitflags::bitflags;
 
 
@@ -127,16 +128,16 @@ struct CameraCallbackContext {
 
 
 
-pub struct Camera<'a> {
-    vimba: &'a Vimba,
+pub struct Camera {
+    vimba_ctx: Arc<VimbaContext>,
     handle: VmbHandle_t,
     open: bool,
     cb_ctx: Option<Pin<Box<CameraCallbackContext>>>
 }
 
-impl<'a> Camera<'a> {
-    pub fn from_handle(handle: VmbHandle_t, vimba: &'a Vimba) -> Self {
-        Self { vimba, handle, open: true, cb_ctx: None }
+impl Camera {
+    pub(crate) fn from_handle(handle: VmbHandle_t, vimba_ctx: Arc<VimbaContext>) -> Self {
+        Self { vimba_ctx, handle, open: true, cb_ctx: None }
     }
 
     pub fn close(&mut self) -> Result<()> {
@@ -280,66 +281,9 @@ impl<'a> Camera<'a> {
         rx.recv().unwrap();
         self.stop_streaming()
     }
-
-    /*pub fn stream<F: CameraCallback>(&self, mut handler: F) -> Result<()> {
-        if self.cb_ctx.is_some() { return Err(Error::DeviceBusy) }
-
-        let size = self.get_feature_int("PayloadSize")?;
-        let mut frame = VmbFrame_t::default();
-        let mut buffer = vec![0u8; size as usize];
-        let (mut stop_tx, stop_rx) = mpsc::channel::<()>();
-        let mut stopped = false;
-        
-        frame.buffer = buffer.as_mut_ptr() as *mut std::ffi::c_void;
-        frame.bufferSize = size as u32;
-        frame.context[0] = &mut handler as *mut F as *mut std::ffi::c_void;
-        frame.context[1] = &mut stop_tx as *mut _ as *mut std::ffi::c_void;
-        frame.context[2] = &mut stopped as *mut bool as *mut std::ffi::c_void;
-
-        unsafe extern "C" fn wrapper<F>(cam: VmbHandle_t, frame: *mut VmbFrame_t)
-        where F: CameraCallback {
-            let stopped = (*frame).context[2] as *mut bool;
-
-            if *stopped { return; }
-
-            let handler = &mut *((*frame).context[0] as *mut F);
-            let stop_tx = &mut *((*frame).context[1] as *mut mpsc::Sender::<()>);
-            let buffer_size = (*frame).bufferSize as usize;
-            let buffer_ptr = (*frame).buffer as *const u8;
-            let buffer = std::slice::from_raw_parts(buffer_ptr, buffer_size);
-            
-            let action = handler(buffer);
-
-            if *stopped == false && action == Flow::Break {
-                *stopped = true;
-                stop_tx.send(()).unwrap()
-            }
-
-            vmbcall!(VmbCaptureFrameQueue, cam, frame, Some(wrapper::<F>)).unwrap();
-        }
-        
-        self.set_feature_enum("AcquisitionStatusSelector", "AcquisitionActive")?;
-        self.set_feature_enum("AcquisitionMode", "Continuous")?;
-
-        vmbcall!(VmbFrameAnnounce, self.handle, &frame, FRAME_SIZE)?;
-        vmbcall!(VmbCaptureStart, self.handle)?;
-        vmbcall!(VmbCaptureFrameQueue, self.handle, &frame, Some(wrapper::<F>))?;
-
-        self.run_command("AcquisitionStart")?;
-        stop_rx.recv().unwrap();
-        self.run_command("AcquisitionStop")?;
-
-        while self.get_feature_bool("AcquisitionStatus")? {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        
-        vmbcall!(VmbCaptureEnd, self.handle)?;
-
-        Ok(())
-    }*/
 }
 
-impl<'a> HasFeatures for Camera<'a> {
+impl HasFeatures for Camera {
     fn get_feature(&self, name: &str) -> Result<FeatureValue> {
         self.handle.get_feature(name)
     }
@@ -361,7 +305,7 @@ impl<'a> HasFeatures for Camera<'a> {
     }
 }
 
-impl<'a> Drop for Camera<'a> {
+impl Drop for Camera {
     fn drop(&mut self) {
         if let Err(e) = self.close() {
             panic!("Could not close camera during drop due to error: {e:?}");
