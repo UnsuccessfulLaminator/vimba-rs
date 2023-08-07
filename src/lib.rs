@@ -13,9 +13,6 @@ pub mod feature;
 pub use error::Error;
 pub use vimba::Vimba;
 
-#[derive(PartialEq, Clone, Copy, Debug)]
-pub enum Flow { Continue, Break }
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[macro_export]
@@ -33,6 +30,5 @@ macro_rules! vmbcall {
 pub mod prelude {
     pub use crate::feature::HasFeatures;
     pub use crate::vimba::Vimba;
-    pub use crate::camera::{Camera, AccessMode, Frame};
-    pub use crate::Flow;
+    pub use crate::camera::{Camera, AccessMode, Frame, StreamContinue};
 }

@@ -5,7 +5,7 @@ use crate::feature::*;
 use crate::error::Error;
 use crate::vimba::VimbaContext;
 use crate::util::pointer_to_str;
-use crate::{Result, vmbcall, Flow};
+use crate::{Result, vmbcall};
 use std::mem;
 use std::sync::mpsc;
 use std::pin::Pin;
@@ -127,9 +127,9 @@ impl<T> Default for Frame<T> where T: Default + AsRef<[u8]> {
 
 
 
-pub trait CameraCallback: Send + FnMut(Frame<&[u8]>) -> Flow {}
+pub trait CameraCallback: Send + FnMut(Frame<&[u8]>) -> StreamContinue {}
 
-impl<T> CameraCallback for T where T: Send + FnMut(Frame<&[u8]>) -> Flow {}
+impl<T> CameraCallback for T where T: Send + FnMut(Frame<&[u8]>) -> StreamContinue {}
 
 struct CameraCallbackContext {
     handler: Box<dyn CameraCallback>,
@@ -139,6 +139,11 @@ struct CameraCallbackContext {
     stop_rx: mpsc::Receiver::<()>,
     stopped: bool
 }
+
+
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub struct StreamContinue(pub bool);
 
 
 
@@ -174,7 +179,7 @@ impl Camera {
         self.stream(move |frame: Frame<&[u8]>| {
             tx.send(frame.with_vec_data()).unwrap();
 
-            Flow::Break
+            StreamContinue(false)
         })?;
 
         Ok(rx.recv().unwrap())
@@ -210,8 +215,8 @@ impl Camera {
         cb_ctx.frame.context[2] = &mut cb_ctx.stopped as *mut bool as *mut std::ffi::c_void;
         
         // This is the actual Vimba callback. It'll run the given handler until it
-        // returns Flow::Break, or until we tell streaming to stop by sending ()
-        // down the stop_tx --> stop_rx channel.
+        // returns StreamContinue(false), or until we tell streaming to stop by sending
+        // a () down the stop_tx --> stop_rx channel.
         unsafe extern "C" fn wrapper<F>(cam: VmbHandle_t, frame: *mut VmbFrame_t)
         where F: CameraCallback {
             let stopped = (*frame).context[2] as *mut bool;
@@ -223,7 +228,7 @@ impl Camera {
             let handler = &mut *((*frame).context[0] as *mut F);
             let frame_rs = Frame::from_c_struct_ref_data(&*frame);
             
-            if handler(frame_rs) == Flow::Break {
+            if handler(frame_rs) == StreamContinue(false) {
                 *stopped = true;
             }
             else {
@@ -286,7 +291,7 @@ impl Camera {
         let wrapper = move |frame: Frame<&[u8]>| {
             let action = handler(frame);
 
-            if action == Flow::Break { tx.send(()).unwrap(); }
+            if action == StreamContinue(false) { tx.send(()).unwrap(); }
 
             action
         };
