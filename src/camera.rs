@@ -133,10 +133,10 @@ impl<T> CameraCallback for T where T: Send + FnMut(Frame<&[u8]>) -> StreamContin
 
 struct CameraCallbackContext {
     handler: Box<dyn CameraCallback>,
-    frame: VmbFrame_t,
-    buffer: Vec::<u8>,
-    stop_tx: mpsc::Sender::<()>,
-    stop_rx: mpsc::Receiver::<()>,
+    frames: Vec<VmbFrame_t>,
+    buffers: Vec<Vec<u8>>,
+    stop_tx: mpsc::Sender<()>,
+    stop_rx: mpsc::Receiver<()>,
     stopped: bool
 }
 
@@ -175,18 +175,20 @@ impl Camera {
 
     pub fn get_frame(&mut self) -> Result<Frame<Vec<u8>>> {
         let (tx, rx) = mpsc::channel::<Frame<_>>();
-
-        self.stream(move |frame: Frame<&[u8]>| {
+        let handler = move |frame: Frame<&[u8]>| {
             tx.send(frame.with_vec_data()).unwrap();
 
             StreamContinue(false)
-        })?;
+        };
+        
+        // Using 2 buffers here in case streaming doesn't stop fast enough
+        self.stream(handler, 2)?;
 
         Ok(rx.recv().unwrap())
     }
     
     // This is the most horrible thing I have ever written. God bless.
-    pub fn start_streaming<F>(&mut self, handler: F) -> Result<()>
+    pub fn start_streaming<F>(&mut self, handler: F, buffers: usize) -> Result<()>
     where F: CameraCallback + 'static {
         if self.cb_ctx.is_some() { return Err(Error::DeviceBusy) }
         
@@ -197,8 +199,8 @@ impl Camera {
         // regrettably, it does need to be enclosed in a pin.
         let mut cb_ctx = Box::pin(CameraCallbackContext {
             handler: Box::new(handler),
-            frame: VmbFrame_t::default(),
-            buffer: vec![0u8; size as usize],
+            frames: vec![VmbFrame_t::default(); buffers],
+            buffers: vec![vec![0u8; size as usize]; buffers],
             stop_tx,
             stop_rx,
             stopped: false
@@ -207,12 +209,21 @@ impl Camera {
         // Now that it's pinned, we can take pointers without worrying about them
         // becoming invalid later on. The context pointers will be read inside the
         // streaming thread to reference things on the rust side from the C side.
-        cb_ctx.frame.buffer = cb_ctx.buffer.as_mut_ptr() as *mut std::ffi::c_void;
-        cb_ctx.frame.bufferSize = size as u32;
-        cb_ctx.frame.context[0] = cb_ctx.handler.as_mut() as *mut dyn CameraCallback
-                                                          as *mut std::ffi::c_void;
-        cb_ctx.frame.context[1] = &mut cb_ctx.stop_rx as *mut _ as *mut std::ffi::c_void;
-        cb_ctx.frame.context[2] = &mut cb_ctx.stopped as *mut bool as *mut std::ffi::c_void;
+        let stop_rx_ptr = &mut cb_ctx.stop_rx as *mut _ as *mut std::ffi::c_void;
+        let stopped_ptr = &mut cb_ctx.stopped as *mut bool as *mut std::ffi::c_void;
+        let handler_ptr = cb_ctx.handler.as_mut() as *mut dyn CameraCallback
+                                                  as *mut std::ffi::c_void;
+
+        for i in 0..buffers {
+            cb_ctx.frames[i].buffer = cb_ctx.buffers[i].as_mut_ptr() as *mut std::ffi::c_void;
+            cb_ctx.frames[i].bufferSize = size as u32;
+            cb_ctx.frames[i].context[0] = handler_ptr;
+            cb_ctx.frames[i].context[1] = stop_rx_ptr;
+            cb_ctx.frames[i].context[2] = stopped_ptr;
+            
+            // Tell vimba this frame exists
+            vmbcall!(VmbFrameAnnounce, self.handle, &cb_ctx.frames[i], FRAME_SIZE)?;
+        }
         
         // This is the actual Vimba callback. It'll run the given handler until it
         // returns StreamContinue(false), or until we tell streaming to stop by sending
@@ -241,11 +252,12 @@ impl Camera {
         self.set_feature_enum("AcquisitionStatusSelector", "AcquisitionActive")?;
         self.set_feature_enum("AcquisitionMode", "Continuous")?;
         
-        // Tell Vimba the frame exists, then enter capture mode and queue this frame
-        // to be the next one an image should be put into.
-        vmbcall!(VmbFrameAnnounce, self.handle, &cb_ctx.frame, FRAME_SIZE)?;
+        // Enter capture mode and queue all the frames to be filled in order
         vmbcall!(VmbCaptureStart, self.handle)?;
-        vmbcall!(VmbCaptureFrameQueue, self.handle, &cb_ctx.frame, Some(wrapper::<F>))?;
+
+        for frame in &cb_ctx.frames {
+            vmbcall!(VmbCaptureFrameQueue, self.handle, frame, Some(wrapper::<F>))?;
+        }
 
         // Save the callback context so it exists while streaming
         self.cb_ctx = Some(cb_ctx);
@@ -275,9 +287,16 @@ impl Camera {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             
-            // End the capture and tell Vimba the frame can't be used any more
+            // End the capture and flush out any remaining queued frames. Flushing
+            // is needed because trying to revoke a queued frame will cause Vimba
+            // to emit its very cryptic "Other" error.
             vmbcall!(VmbCaptureEnd, self.handle)?;
-            vmbcall!(VmbFrameRevoke, self.handle, &cb_ctx.frame)?;
+            vmbcall!(VmbCaptureQueueFlush, self.handle)?;
+
+            // Tell Vimba these frames cannot be used any more
+            for frame in &cb_ctx.frames {
+                vmbcall!(VmbFrameRevoke, self.handle, frame)?;
+            }
             
             // Deallocate the callback context
             self.cb_ctx = None;
@@ -286,7 +305,8 @@ impl Camera {
         Ok(())
     }
 
-    pub fn stream<F: CameraCallback + 'static>(&mut self, mut handler: F) -> Result<()> {
+    pub fn stream<F: CameraCallback + 'static>(&mut self, mut handler: F, buffers: usize)
+    -> Result<()> {
         let (tx, rx) = mpsc::channel::<()>();
         let wrapper = move |frame: Frame<&[u8]>| {
             let action = handler(frame);
@@ -296,9 +316,19 @@ impl Camera {
             action
         };
 
-        self.start_streaming(wrapper)?;
+        self.start_streaming(wrapper, buffers)?;
         rx.recv().unwrap();
         self.stop_streaming()
+    }
+
+    pub fn start_streaming_queue(&mut self, sender: mpsc::Sender<Frame<Vec<u8>>>, buffers: usize)
+    -> Result<()> {
+        let handler = move |frame: Frame<&[u8]>| {
+            let res = sender.send(frame.with_vec_data());
+            StreamContinue(res.is_ok())
+        };
+
+        self.start_streaming(handler, buffers)
     }
 }
 
