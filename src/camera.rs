@@ -4,6 +4,7 @@ use crate::vimba_sys::*;
 use crate::feature::*;
 use crate::error::Error;
 use crate::vimba::VimbaContext;
+use crate::format::PixelFormat;
 use crate::util::pointer_to_str;
 use crate::{Result, vmbcall};
 use std::mem;
@@ -11,6 +12,7 @@ use std::sync::mpsc;
 use std::pin::Pin;
 use std::sync::Arc;
 use bitflags::bitflags;
+use num_traits::FromPrimitive;
 
 
 
@@ -63,7 +65,8 @@ pub struct Frame<T: AsRef<[u8]>> {
     pub offset_x: usize,
     pub offset_y: usize,
     pub id: u64,
-    pub timestamp: u64
+    pub timestamp: u64,
+    pub format: PixelFormat
 }
 
 impl<T: AsRef<[u8]>> Frame<T> {
@@ -75,7 +78,9 @@ impl<T: AsRef<[u8]>> Frame<T> {
             offset_x: frame.offsetX as usize,
             offset_y: frame.offsetY as usize,
             id: frame.frameID,
-            timestamp: frame.timestamp
+            timestamp: frame.timestamp,
+            format: PixelFormat::from_u32(frame.pixelFormat)
+                                .expect("Invalid pixelFormat in C struct")
         }
     }
 
@@ -88,7 +93,8 @@ impl<T: AsRef<[u8]>> Frame<T> {
             offset_x: self.offset_x,
             offset_y: self.offset_y,
             id: self.id,
-            timestamp: self.timestamp
+            timestamp: self.timestamp,
+            format: self.format
         }
     }
 
@@ -98,6 +104,10 @@ impl<T: AsRef<[u8]>> Frame<T> {
 
     pub fn with_vec_data(&self) -> Frame<Vec<u8>> {
         self.map_data(|data| data.as_ref().to_vec())
+    }
+
+    pub fn unpack_data_to_u16(&self) -> Option<Vec<u16>> {
+        self.format.unpack_to_u16(self.data.as_ref())
     }
 }
 
@@ -120,7 +130,8 @@ impl<T> Default for Frame<T> where T: Default + AsRef<[u8]> {
             offset_x: 0,
             offset_y: 0,
             id: 0,
-            timestamp: 0
+            timestamp: 0,
+            format: PixelFormat::default()
         }
     }
 }
@@ -321,8 +332,9 @@ impl Camera {
         self.stop_streaming()
     }
 
-    pub fn start_streaming_queue(&mut self, sender: mpsc::Sender<Frame<Vec<u8>>>, buffers: usize)
-    -> Result<()> {
+    pub fn start_streaming_queue(
+        &mut self, sender: mpsc::Sender<Frame<Vec<u8>>>, buffers: usize
+    ) -> Result<()> {
         let handler = move |frame: Frame<&[u8]>| {
             let res = sender.send(frame.with_vec_data());
             StreamContinue(res.is_ok())
